@@ -1,0 +1,67 @@
+name: Auto Create PRs to Feature and Release Branches
+
+on:
+  push:
+    branches:
+      - master  # Trigger only when master is updated
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  create-or-update-prs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Ensure full history
+
+      - name: Fetch All Branches
+        run: git fetch --all --prune
+
+      - name: Get Active Feature/Release Branches
+        run: |
+          echo "Finding feature and release branches..."
+          git branch -r | grep -E 'origin/(ltf-|fv-)' | sed 's/origin\///' | awk '{$1=$1};1' > branches.txt
+
+          if [[ ! -s branches.txt ]]; then
+            echo "No feature or release branches found."
+            exit 0
+          fi
+
+      - name: Debugging - Print Target Branches
+        run: cat branches.txt
+
+      - name: Create or Update PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Use default GitHub token
+        run: |
+          while read BRANCH; do
+            echo "Checking PR status for master -> $BRANCH"
+
+            # Check if PR already exists
+            PR_EXISTS=$(gh pr list --base "$BRANCH" --head "master" --state open --json number --jq '.[0].number')
+
+            if [[ -z "$PR_EXISTS" ]]; then
+              echo "Creating PR from master -> $BRANCH"
+              gh pr create --base "$BRANCH" --head "master" --title "Merge master into $BRANCH" --body "Automated PR to keep $BRANCH up to date with master"
+            else
+              echo "PR already exists for master -> $BRANCH (PR #$PR_EXISTS)"
+
+              # Fetch latest updates
+              git fetch origin master
+              git fetch origin "$BRANCH"
+
+              # Compare commits between master and the target branch
+              NEW_COMMITS=$(git rev-list --count origin/"$BRANCH"..origin/master)
+
+              if [[ "$NEW_COMMITS" -gt 0 ]]; then
+                echo "Updating PR #$PR_EXISTS with new changes from master"
+                gh pr comment "$PR_EXISTS" --body "New changes detected in master. Please review and merge if appropriate."
+              else
+                echo "No new changes to merge from master -> $BRANCH"
+              fi
+            fi
+          done < branches.txt
